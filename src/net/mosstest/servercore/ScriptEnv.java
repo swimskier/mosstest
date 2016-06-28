@@ -1,129 +1,109 @@
 package net.mosstest.servercore;
 
-import java.io.IOException;
-import java.util.HashMap;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
-
-import javax.script.Invocable;
-
 import net.mosstest.scripting.MossScriptEnv;
-import net.mosstest.scripting.ScriptableDatabase;
-
+import net.mosstest.servercore.MosstestSecurityManager.ThreadContext;
+import org.apache.log4j.Logger;
 import org.mozilla.javascript.*;
 
+import java.io.IOException;
+import java.text.MessageFormat;
+
+// TODO: Auto-generated Javadoc
+
 /**
- * Static environment for executing scripts. Call {@link ScriptEnv.runScript()}
+ * Static environment for executing scripts. Call {@link ScriptEnv#runScript(IMossFile)}
  * to call a script.
- * 
- * This class is made possible by the guidance given by blogger Jani Hartikainen
- * in <a href="http://codeutopia.net/blog/2009/01/02/sandboxing-rhino-in-java/">
- * Sandboxing Rhino in Java</a>.
- * 
+ *
  * @author rarkenin
  */
 public class ScriptEnv {
-	ScriptableObject globalScope;
 
-	private static class ScriptClassShutter implements ClassShutter {
-		public ScriptClassShutter() {
+    static Logger logger = Logger.getLogger(ScriptEnv.class);
 
-		}
+    ImporterTopLevel globalScope;
 
-		public boolean visibleToScripts(String className) {
-			if (className.startsWith("adapter") //$NON-NLS-1$
-					|| className.startsWith("net.mosstest.scripting")) //$NON-NLS-1$
-				return true;
-			else
-				return false;
-		}
-	}
 
-	private ScriptableDatabase localDb;
+    /**
+     * The Enum ScriptResult.
+     */
+    public enum ScriptResult {
 
-	public enum ScriptResult {
-		RESULT_EXECUTED, RESULT_EXECUTNG_BACKGROUND, RESULT_ERROR, RESULT_SECURITY_EXCEPTION, RESULT_SECURITY_ELEVATABLE
-	}
+        /**
+         * The result executed.
+         */
+        RESULT_EXECUTED,
+        /**
+         * The result executng background.
+         */
+        RESULT_EXECUTNG_BACKGROUND,
+        /**
+         * The result error.
+         */
+        RESULT_ERROR,
+        /**
+         * The result security exception.
+         */
+        RESULT_SECURITY_EXCEPTION,
+        /**
+         * The result security elevatable.
+         */
+        RESULT_SECURITY_ELEVATABLE
+    }
 
-	/**
-	 * Executes a script with default permissions. This will allow sandboxed
-	 * access to the database, and gameplay data, without access to
-	 * authentication data. These scripts have access to
-	 * <code>Hashmap&lt;String, Object&gt;</code>-style maps used for extended
-	 * custom attributes, and may access various API classes via
-	 * {@link net.mosstest.scripting.JavaApi JavaApi}(which internally uses
-	 * reflection to obtain classes). Via an ACL, certain classes may be blocked
-	 * or replaced with limited versions thereof. At the time of writing, this
-	 * feature is incomplete and will use a limited ACL.
-	 * 
-	 * @param script
-	 *            A string representing the script to run
-	 * @return A {@link ScriptEnv.ScriptResult} constant representing the
-	 *         result.
-	 */
-	public ScriptResult runScript(MossScript script) throws MossWorldLoadException{
-		try {
-			this.cx.evaluateReader(globalScope, script.getReader(),
-					script.file.toString(), 0, null);
-		} catch (IOException e) {
-			return ScriptResult.RESULT_ERROR;
-		} catch (RhinoException e) {
-			throw new MossWorldLoadException("Script error has occured. Wrapped exception: \r\n"+e.getMessage()+"\r\n"+e.getScriptStackTrace()); //$NON-NLS-1$
-		}
-		return ScriptResult.RESULT_EXECUTED;
-	}
+    /**
+     * Executes a script with default permissions. This will allow sandboxed
+     * access to the database, and gameplay data, without access to
+     * authentication data. Via an ACL, certain classes may be blocked
+     * or replaced with limited versions thereof. At the time of writing, this
+     * feature uses a security manager to disallow anything that tries to access risky data or sockets.
+     *
+     * @param script A string representing the script to run
+     * @return A {@link ScriptEnv.ScriptResult} constant representing the
+     * result.
+     * @throws MossWorldLoadException the moss world load exception
+     */
+    public ScriptResult runScript(IMossFile script)
+            throws MossWorldLoadException {
 
-	
+        try {
+            Script sc = this.cx.compileReader(script.getReader(),
+                    script.toString(), 0, null);
 
-	
+            Object lock = new Object();
+            MosstestSecurityManager.instance.lock(lock,
+                    ThreadContext.CONTEXT_SCRIPT);
+            sc.exec(this.cx, this.globalScope);
+            MosstestSecurityManager.instance.unlock(lock);
+        } catch (IOException e) {
+            logger.fatal(MessageFormat.format(Messages.getString("SCRIPT_IOEXCEPTION"), script.getName(), e.getLocalizedMessage()));
+            return ScriptResult.RESULT_ERROR;
+        } catch (RhinoException e) {
+            logger.error(MessageFormat.format(Messages.getString("SCRIPT_ERR"), e.getMessage()));
+            throw new MossWorldLoadException(
+                    MessageFormat.format(Messages.getString("ScriptEnv.ERR_SCRIPT_ERR"), e.getMessage()) + "\r\n" + e.getScriptStackTrace(), e); //$NON-NLS-1$ //$NON-NLS-2$
+        } catch (Error e) {
+            // We are really screwed with classloading if we reach this block
+            logger.fatal(MessageFormat.format(Messages.getString("CLASSLOADER_FAIL"), e.getClass().getName(), e.getLocalizedMessage()));
+        }
+        return ScriptResult.RESULT_EXECUTED;
+    }
 
-	protected static class SandboxWrapFactory extends WrapFactory {
-		@Override
-		public Scriptable wrapAsJavaObject(Context cx, Scriptable scope,
-				Object javaObject, Class<?> staticType) {
-			return new SandboxNativeJavaObject(scope, javaObject, staticType);
-		}
-	}
+    private Context cx;
 
-	protected static class SandboxContextFactory extends ContextFactory {
+    /**
+     * Instantiates a new script env.
+     *
+     * @param ev the ev
+     */
+    public ScriptEnv(MossScriptEnv ev) {
+        this.cx = ContextFactory.getGlobal().enterContext();
+        this.globalScope = new ImporterTopLevel();
+        this.globalScope.initStandardObjects(cx, false);
+        cx.setOptimizationLevel(9);
+        this.globalScope.put("moss", this.globalScope, ev); //$NON-NLS-1$
 
-		@Override
-		protected Context makeContext() {
-			Context cx = super.makeContext();
-			cx.setClassShutter(new ScriptClassShutter());
-			cx.setWrapFactory(new SandboxWrapFactory());
-			return cx;
-		}
-	}
 
-	private Context cx;
+    }
 
-	public ScriptEnv(MossScriptEnv ev) {
-		ContextFactory.initGlobal(new SandboxContextFactory());
-		this.cx = ContextFactory.getGlobal().enterContext();
-		globalScope = this.cx.initStandardObjects();
-		globalScope.put("moss", globalScope, ev);
-	}
-
-	public static class SandboxNativeJavaObject extends NativeJavaObject {
-
-		private static final long serialVersionUID = 4829780635666396547L;
-
-		public SandboxNativeJavaObject(Scriptable scope, Object javaObject,
-				Class<?> staticType) {
-			super(scope, javaObject, staticType);
-		}
-
-		@Override
-		public Object get(String name, Scriptable start) {
-			if (name.equals("getClass")) { //$NON-NLS-1$
-				return NOT_FOUND;
-			}
-
-			return super.get(name, start);
-		}
-	}
 
 }

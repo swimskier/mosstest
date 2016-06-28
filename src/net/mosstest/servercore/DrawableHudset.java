@@ -1,5 +1,13 @@
 package net.mosstest.servercore;
 
-public class DrawableHudset {
+import com.jme3.scene.Node;
 
+/**
+ * The Class DrawableHudset.
+ */
+public class DrawableHudset {
+    public Node getHudNode(){
+        return null;
+    }
+    
 }

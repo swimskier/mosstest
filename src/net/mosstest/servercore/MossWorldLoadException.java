@@ -1,10 +1,17 @@
 package net.mosstest.servercore;
 
+// TODO: Auto-generated Javadoc
+/**
+ * The Class MossWorldLoadException.
+ */
 public class MossWorldLoadException extends Exception {
-	String reason;
 
-	public MossWorldLoadException(String string) {
-		reason = string;
-	}
 
+    public MossWorldLoadException(String message, Throwable cause) {
+        super(message, cause);
+    }
+
+    public MossWorldLoadException(String message) {
+        super(message);
+    }
 }

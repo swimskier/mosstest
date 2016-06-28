@@ -1,457 +1,358 @@
+
 package net.mosstest.scripting;
 
-import java.util.ArrayList;
-import java.util.EnumMap;
+import net.mosstest.scripting.events.IMossEvent;
+import net.mosstest.scripting.handlers.MossEventHandler;
+import net.mosstest.scripting.handlers.MossNodeChangeHandler;
+import net.mosstest.servercore.*;
+import org.jetbrains.annotations.NonNls;
 
-import net.mosstest.servercore.Entity;
-import net.mosstest.servercore.ItemStack;
-import net.mosstest.servercore.MapNode;
-import net.mosstest.servercore.MossEvent;
-import net.mosstest.servercore.MossInventory;
-import net.mosstest.servercore.NodeCache;
-import net.mosstest.servercore.NodePosition;
-import net.mosstest.servercore.Player;
-import net.mosstest.servercore.Position;
-import net.mosstest.servercore.ScriptSandboxBorderToken;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
 
 /**
- * 
  * This class is used by scripts and script-facing portions of Mosstest. Methods
  * restricted to be called from trusted Java-side shall pass a
  * {@link ScriptSandboxBorderToken}. Each event fired will run in the thread
  * pool. All requests via this API need not concern themselves with threading as
  * everything is handled by Mosstest itself.
- * 
+ * <p>
  * The event handlers called are the ones defined via this class's registerOnFoo
  * methods, followed by any handlers defined in an instance of NodeParams via an
  * anonymous inner class, and finally with the default handler.
- * 
+ * <p>
  * The order in which handlers registered here are called is undefined due to
  * the undefined order of scripts being loaded. Generally, this is planned to
  * occur in an order based on the SHA512 hash of the script. Comments with dummy
  * information may be used by the script author to attempt to set the position
  * of a script in the execution order via manipulating the hash. Handlers of the
  * same types within the same script are guaranteed to be called in order.
- * 
+ * <p>
  * An event handler may interrupt handling of the event so that no further event
- * handlers nor the default are ever called, by throwing an instance of
- * {@link EventProcessingCompletedSignal}.
- * 
+ * handlers nor the default are ever called, by returning the proper boolean value
+ *
  * @author rarkenin
- * @since 0.0
  * @version 0.0
+ * @since 0.0
  */
 public class MossScriptEnv {
+    public static final short SCRIPT_API_VERSION = 1;
+    public static final short MIN_SCRIPT_API_VERSION = 1;
+    public static final short MAX_SCRIPT_API_VERSION = 1;
+    public void registerNodeChangeHandler(MossNodeChangeHandler h) {
 
-	/*
-	 * IMPORTANT, IMPORTANT, IMPORTANT. VERY IMPORTANT. THIS CLASS IS THE ONLY
-	 * CLASS THAT SCRIPTS CAN ACCESS. MAKE ALL FIELDS AND METHODS PRIVATE UNLESS
-	 * IT IS INTENDED TO FACE UNTRUSTED SCRIPTS.
-	 */
-	private EnumMap<MossEvent.EvtType, ArrayList<MossEventHandler>> registeredScriptEvents = new EnumMap<>(
-			MossEvent.EvtType.class);
-	private ScriptableDatabase db;
-	private NodeCache nc;
-	/**
-	 * Registers an event hander to fire on a player death. This will be run in
-	 * the event processor thread pool. The default handler shall respawn the
-	 * player at the spawnpoint and set health to default.
-	 * 
-	 * @param r
-	 *            The event handler to register.
-	 */
-	void registerOnDieplayer(MossEventHandler r) {
-		this.registeredScriptEvents.get(MossEvent.EvtType.EVT_DIEPLAYER).add(r);
-	}
+    }
 
-	/**
-	 * Registers an event hander to fire on a node being dug. This will be run
-	 * in the event processor thread pool. The default handler will remove the
-	 * node and add its drop to the inventory of the digger if possible.
-	 * 
-	 * @param r
-	 *            The event handler to register.
-	 */
-	void registerOnDignode(MossEventHandler r) {
-		this.registeredScriptEvents.get(MossEvent.EvtType.EVT_DIGNODE).add(r);
-	}
+    private InheritableThreadLocal<Short> requestedScriptApiVer = new InheritableThreadLocal<Short>(){
+        @Override
+        protected Short initialValue() {
+            return MAX_SCRIPT_API_VERSION;
+        }
+    };
 
-	/**
-	 * Registers an event hander to fire on map generation. This will be run in
-	 * the event processor thread pool before the default map generator. The
-	 * default map generator shall create the chunk to be a recreation of a
-	 * landscape.
-	 * 
-	 * @param r
-	 *            The event handler to register.
-	 */
-	void registerOnGenerate(MossEventHandler r) {
-		this.registeredScriptEvents.get(MossEvent.EvtType.EVT_GENERATE).add(r);
-	}
+    public void setRequestedScriptApiVer(short requestedScriptApiVer) {
+        if(requestedScriptApiVer >= MIN_SCRIPT_API_VERSION && requestedScriptApiVer <= MAX_SCRIPT_API_VERSION)
+            this.requestedScriptApiVer.set(requestedScriptApiVer);
+        else {
+            throw new MosstestFatalDeathException("A plugin requests an unsatisfiable script API version.");
+        }
+    }
 
-	/**
-	 * Registers an event hander to fire on a player joining. This will be run
-	 * in the event processor thread pool. The default handler will be called
-	 * before any script-specified handlers.
-	 * {@link EventProcessingCompletedSignal} will still bypass future handlers
-	 * but not default ones. The default handler initializes player data in
-	 * memory from the database.
-	 * 
-	 * @param r
-	 *            The event handler to register.
-	 */
-	void registerOnJoinplayer(MossEventHandler r) {
-		this.registeredScriptEvents.get(MossEvent.EvtType.EVT_JOINPLAYER).add(r);
-	}
+    private HashMap<Class<? extends IMossEvent>, ArrayList<MossEventHandler>> eventHandlers;
 
-	/**
-	 * Registers an event hander to fire on a player quitting. This will be run
-	 * in the event processor thread pool.
-	 * {@link EventProcessingCompletedSignal} will bypass future handlers but
-	 * the default handler will be run even if the signal is thrown. The default
-	 * handler will clean up the player in memory.
-	 * 
-	 * @param r
-	 *            The event handler to register.
-	 */
-	void registerOnQuitplayer(MossEventHandler r) {
-		this.registeredScriptEvents.get(MossEvent.EvtType.EVT_QUITPLAYER).add(r);
-	}
+    private ScriptableDatabase db;
 
-	/**
-	 * Registers an event hander to fire on a new player registering and
-	 * entering. This will be run in the event processor thread pool. The
-	 * default handler will be called before any script-specified handlers.
-	 * {@link EventProcessingCompletedSignal} will still bypass future handlers
-	 * but not default ones. The default handler initializes player data in
-	 * memory and the database. No items are given by default.
-	 * 
-	 * @param r
-	 *            The event handler to register.
-	 */
-	void registerOnNewplayer(MossEventHandler r) {
-		this.registeredScriptEvents.get(MossEvent.EvtType.EVT_NEWPLAYER).add(r);
-	}
+    private MapCache nc;
 
-	/**
-	 * Registers an event hander to fire on a node being placed. This will be
-	 * run in the event processor thread pool. The default handler removes the
-	 * item from the placer's inventory and puts down a node or entity.
-	 * 
-	 * @param r
-	 *            The event handler to register.
-	 */
-	void registerOnPlacenode(MossEventHandler r) {
-		this.registeredScriptEvents.get(MossEvent.EvtType.EVT_PLACENODE).add(r);
-	}
+    private FuturesProcessor fp;
 
-	/**
-	 * Registers an event hander to fire on a formspec being opened. This will
-	 * be run in the event processor thread pool. A formspec is an XML-based 2D
-	 * script-specified UI. The default handler is defined in the formspec. This
-	 * is a way of catch-all for formspecs and shouldn't be used for
-	 * implementing one formspec.
-	 * 
-	 * @param r
-	 *            The event handler to register.
-	 */
-	void registerOnFspecOpen(MossEventHandler r) {
-		this.registeredScriptEvents.get(MossEvent.EvtType.EVT_FSPEC_OPEN).add(r);
-	}
+    private INodeManager nm;
 
-	/**
-	 * Registers an event hander to fire on a formspec being submitted. This
-	 * will be run in the event processor thread pool. This is a catch-all
-	 * method and the default handler created in the formspec should be used for
-	 * implementing behavior.
-	 * 
-	 * @param r
-	 *            The event handler to register.
-	 */
-	void registerOnFspecSubmit(MossEventHandler r) {
-		this.registeredScriptEvents.get(MossEvent.EvtType.EVT_FSPEC_SUBMIT).add(r);
-	}
 
-	/**
-	 * Registers an event hander to fire on an inventory action. This will be
-	 * run in the event processor thread pool. The default handler performs the
-	 * action as-is.
-	 * 
-	 * @param r
-	 *            The event handler to register.
-	 */
-	void registerOnInvAction(MossEventHandler r) {
-		this.registeredScriptEvents.get(MossEvent.EvtType.EVT_FSPEC_INVACTION)
-				.add(r);
-	}
+    /**
+     * Sends a chat message to a player.
+     *
+     * @param recipient A {@link Player} object representing the recipient. A Player
+     *                  object may be constructed with
+     *                  {@link MossScriptEnv#getPlayerByName(String)}.
+     * @param from      A player object representing the sender. A Player object may
+     *                  be constructed with
+     *                  {@link MossScriptEnv#getPlayerByName(String)}. If null a
+     *                  message is sent showing to users as having been sent by the
+     *                  server with the prefix <code>[*] Server:</code>
+     * @param message   A string representing the message that shall be sent to the
+     *                  specified recipient.
+     */
+    public void sendChatMessage(Player recipient, Player from, String message) {
+        // TODO
+    }
 
-	/**
-	 * Registers an event hander to fire on an entity punch. This will be run in
-	 * the event processor thread pool. The default handler performs no action.
-	 * 
-	 * @param r
-	 *            The event handler to register.
-	 */
-	void registerOnEntityPunch(MossEventHandler r) {
-		this.registeredScriptEvents.get(MossEvent.EvtType.EVT_ENTITY_PUNCH).add(r);
-	}
+    /**
+     * Sends a chat message to all players.
+     *
+     * @param from    A player object representing the sender. A Player object may
+     *                be constructed with
+     *                {@link MossScriptEnv#getPlayerByName(String)}. If null a
+     *                message is sent showing to users as having been sent by the
+     *                server with the prefix <code>[*] Server:</code>
+     * @param message A string representing the message that shall be sent to the
+     *                specified recipient.
+     */
+    public void sendChatAll(Player from, String message) {
+        // TODO
+    }
 
-	/**
-	 * Registers an event hander to fire on a player taking damage. This will be
-	 * run in the event processor thread pool. The default handler causes the
-	 * player to take the damage.
-	 * 
-	 * @param r
-	 *            The event handler to register.
-	 */
-	void registerOnPlayerDamage(MossEventHandler r) {
-		this.registeredScriptEvents.get(MossEvent.EvtType.EVT_PLAYERDAMAGE).add(r);
-	}
+    /**
+     * Sets the health on an entity or player.
+     *
+     * @param p      The player to set health on.
+     * @param health A positive integer representing the amount of health to set.
+     */
+    public void setHp(Player p, int health) {
+        // TODO Once we have players doing stuff
+    }
 
-	/**
-	 * Registers an event hander to fire on entity death. This will be run in
-	 * the event processor thread pool. The default handler performs no action
-	 * aside from the removal of said entity.
-	 * 
-	 * @param r
-	 *            The event handler to register.
-	 */
-	void registerOnEntityDeath(MossEventHandler r) {
-		this.registeredScriptEvents.get(MossEvent.EvtType.EVT_ENTITY_DEATH).add(r);
-	}
+    /**
+     * Damages the tool of a player corresponding to a dig. The player's
+     * currently selected tool is damaged.
+     *
+     * @param actor The player that is digging a node.
+     * @param nd    The node dug.
+     * @throws MossScriptException Thrown if the current tool cannot be used to dig the node.
+     */
+    public void damageTool(Player actor, MapNode nd) throws MossScriptException {
+        // TODO Auto-generated method stub
 
-	/**
-	 * Registers an event hander to fire on a chat message from a client. This
-	 * will be run in the event processor thread pool. The default handler sends
-	 * the message to all players.
-	 * 
-	 * @param r
-	 *            The event handler to register.
-	 */
-	void registerOnChatMessage(MossEventHandler r) {
-		this.registeredScriptEvents.get(MossEvent.EvtType.EVT_CHATMESSAGE).add(r);
-	}
+    }
 
-	/**
-	 * Registers an event hander to fire on server shutdown. This will be run in
-	 * the event processor thread pool. The default handler calls internal
-	 * shutdown functions and cannot be bypassed.
-	 * 
-	 * Note that in the case of an error causing shutdown of the server the
-	 * script API may be unavailable or in an inconsistent state so shutdown
-	 * actions cannot be guaranteed to run. They will always be run on a clean
-	 * shutdown.
-	 * 
-	 * @param r
-	 *            The event handler to register.
-	 */
-	void registerOnShutdown(MossEventHandler r) {
-		this.registeredScriptEvents.get(MossEvent.EvtType.EVT_SHUTDOWN).add(r);
-	}
+    /**
+     * Gives a player an item. The item stack will be added to the player's
+     * default inventory, adding to the first available partial stack. If no
+     * partial stacks are available the item is added to the first open slot in
+     * the inventory.
+     *
+     * @param player the player
+     * @param item   the item
+     * @return True if the item could be added, false if the item could not be
+     * added due to insufficient space.
+     */
+    public boolean givePlayer(Player player, MossItem.Stack item) {
+        MossInventory mi = player.getInventory("default", 4, 8, 128);
 
-	/**
-	 * Registers an event hander to fire on a chat command. This will be run in
-	 * the event processor thread pool. The default handler will display an
-	 * invalid command message. Handlers should <b>always</b> override the
-	 * default except in special circumstances.
-	 * 
-	 * @param r
-	 *            The event handler to register.
-	 */
-	void registerOnChatCommand(MossEventHandler r) {
-		this.registeredScriptEvents.get(MossEvent.EvtType.EVT_CHATCOMMAND).add(r);
-	}
+        // use side effect
+        return (mi.addItem(item) == item.amount);
 
-	/**
-	 * Registers an event hander to fire on a node move. This will be run in the
-	 * event processor thread pool. The default handler moves the node.
-	 * 
-	 * @param r
-	 *            The event handler to register.
-	 */
-	void registerOnNodeMove(MossEventHandler r) {
-		this.registeredScriptEvents.get(MossEvent.EvtType.EVT_NODEMOVE).add(r);
-	}
+    }
 
-	/**
-	 * Gets handlers for an event type in the form of an {@link ArrayList} for
-	 * Mosstest internal use. At this time due to limited identification of each
-	 * event there is no support for scripts accessing this directly.
-	 * 
-	 * @param type
-	 *            A {@link MossEvent.EvtType} enumerable value specifying the
-	 *            event type to retrieve.
-	 * @param tok
-	 *            A {@link ScriptSandboxBorderToken} to be used for ensuring
-	 *            that scripts cannot call this method.
-	 * @return An {@link ArrayList} of {@link MossEventHandler} objects.
-	 * @throws SecurityException
-	 */
-	public ArrayList<MossEventHandler> getHandlers(MossEvent.EvtType type,
-			ScriptSandboxBorderToken tok) throws SecurityException {
-		if (!(tok instanceof ScriptSandboxBorderToken) || tok == null)
-			throw new SecurityException(
-					"Attempt to access controlled resources in the script DMZ."); //$NON-NLS-1$
-		return this.registeredScriptEvents.get(type);
-	}
+    /**
+     * Sets a node of the world to a given type. This cannot be called on a
+     * NodePosition with an existing solid node; use
+     * {@link #removeNode(NodePosition)} first.
+     *
+     * @param pos  The position at which to set a node.
+     * @param node The node to place at that position.
+     */
+    public void setNode(NodePosition pos, MapNode node) throws MapGeneratorException {
+        MapChunk chk = this.nc.getChunkNoGenerate(pos.chunk);
+        if (chk == null)
+            return;
+        if (!(this.nm.containsNode(node) || node instanceof IDynamicNode))
+            throw new IllegalArgumentException("The mapnode passed is not contained in the world node manager");
 
-	/**
-	 * Sends a chat message to a player.
-	 * 
-	 * @param recipient
-	 *            A {@link Player} object representing the recipient. A Player
-	 *            object may be constructed with
-	 *            {@link MossScriptEnv#getPlayerByName(String)}.
-	 * @param from
-	 *            A player object representing the sender. A Player object may
-	 *            be constructed with
-	 *            {@link MossScriptEnv#getPlayerByName(String)}. If null a
-	 *            message is sent showing to users as having been sent by the
-	 *            server with the prefix <code>[*] Server:</code>
-	 * @param message
-	 *            A string representing the message that shall be sent to the
-	 *            specified recipient.
-	 */
-	public void sendChatMessage(Player recipient, Player from, String message) {
-		// TODO
-	}
+        chk.setNode(pos.xl, pos.yl, pos.zl, node.getNodeId());
+    }
 
-	/**
-	 * Sends a chat message to all players.
-	 * 
-	 * @param from
-	 *            A player object representing the sender. A Player object may
-	 *            be constructed with
-	 *            {@link MossScriptEnv#getPlayerByName(String)}. If null a
-	 *            message is sent showing to users as having been sent by the
-	 *            server with the prefix <code>[*] Server:</code>
-	 * @param message
-	 *            A string representing the message that shall be sent to the
-	 *            specified recipient.
-	 */
-	public void sendChatAll(Player from, String message) {
-		// TODO
-	}
+    /**
+     * Removes a node, setting it to air. This may be called on a NodePosition
+     * with an existing solid node.
+     *
+     * @param pos The NodePosition at which to remove the node.
+     */
+    public void removeNode(NodePosition pos) throws MapGeneratorException {
+        MapChunk chk = this.nc.getChunkNoGenerate(pos.chunk);
+        if (chk == null)
+            return;
+        chk.setNode(pos.xl, pos.yl, pos.zl, this.nm.getNode("mg:air") //$NON-NLS-1$
+                .getNodeId());
+        this.nc.setChunk(pos.chunk, chk);
+    }
 
-	/**
-	 * Sets the health on an entity or player.
-	 * 
-	 * @param ent
-	 *            The entity to set health on.
-	 * @param health
-	 *            An integer representing the amount of health to set, from 0 to
-	 *            {@link Entity#maxHealth()}.
-	 */
-	public void setHp(Player p, int health) {
-		// TODO Once we have players doing stuff
-	}
+    /**
+     * Get the MapNode at a certain location.
+     *
+     * @param pos The location at which to get the node
+     * @return A MapNode object representing the node at that location.
+     * @throws MapGeneratorException the map generator exception
+     */
+    public MapNode getNode(NodePosition pos) throws MapGeneratorException {
+        return this.nm.getNode((short) this.nc.getChunk(pos.chunk).getNodeId(
+                pos.xl, pos.yl, pos.zl));
 
-	/**
-	 * Damages the tool of a player corresponding to a dig. The player's
-	 * currently selected tool is damaged.
-	 * 
-	 * @param actor
-	 *            The player that is digging a node.
-	 * @param nd
-	 *            The node dug.
-	 * @throws MossScriptException
-	 *             Thrown if the current tool cannot be used to dig the node.
-	 */
-	public void damageTool(Player actor, MapNode nd) throws MossScriptException {
-		// TODO Auto-generated method stub
+    }
 
-	}
+    /**
+     * Registers a mapnode in the world, allowing it to be placed.
+     *
+     * @param nd
+     * @throws MossWorldLoadException
+     */
+    public void registerNode(MapNode nd) throws MossWorldLoadException {
+        this.nm.putNode(nd);
+    }
 
-	/**
-	 * Gives a player an item. The item stack will be added to the player's
-	 * default inventory, adding to the first available partial stack. If no
-	 * partial stacks are available the item is added to the first open slot in
-	 * the inventory.
-	 * 
-	 * @param player
-	 * @param item
-	 * @return True if the item could be added, false if the item could not be
-	 *         added due to insufficient space.
-	 */
-	public boolean givePlayer(Player player, ItemStack item) {
-		return false;
-	}
+    /**
+     * Register a new liquid in the node manager, generating intermediates as needed.
+     *
+     * @param sysname        The name such as default:lava to set. The prefix mg: is used
+     *                       for mapgen-specific nodes, and should be done by creating a
+     *                       node with a different prefix and aliasing mg:foo to it.
+     * @param userFacingName The name to display in the UI, such as Lava or Iron Ore
+     * @param params         An implementation of the {@link LiquidNodeParams} interface
+     *                       detailing the action of the node. {@link LiquidSourceNodeParams} and
+     *                       {@link LiquidFlowingNodeParams} are valid for liquid sources and flowing liquid nodes,
+     *                       respectively.
+     * @param flowParams     the source params
+     * @param textures       A string stating the filename of the textures image.
+     * @param light          The amount of light from 0 to 255 to be emitted.
+     * @return The MapNode object that has been created and added to the
+     * manager.
+     * @throws MossWorldLoadException If an exception occurs during the execution of the
+     *                                registering.
+     */
+    public LiquidNode registerLiquid(@NonNls String sysname, String userFacingName,
+                                     LiquidNodeParams params, LiquidNodeParams flowParams,
+                                     String textures, int light) throws MossWorldLoadException {
+        LiquidNode nd = new LiquidNode(params, textures, sysname,
+                userFacingName, light);
+        this.nm.putNode(nd);
+        nd.level = 0;
+        for (int i = 1; i < 8; i++) {
+            LiquidNode innerNd = new LiquidNode(flowParams, textures, sysname
+                    + "$LEVEL$" + i, userFacingName, light); //$NON-NLS-1$
+            innerNd.setByBounds(-.5f, .5f, -.5f, .5f, -.5f, (i / 8f) - 0.5f);
+            nd.liquidLevels[i] = innerNd;
+            innerNd.liquidLevels = nd.liquidLevels;
+            innerNd.level = i;
+            this.nm.putNode(innerNd);
+        }
+        nd.liquidLevels[0] = nd;
+        return nd;
+    }
 
-	/**
-	 * Sets a node of the world to a given type. This cannot be called on a
-	 * NodePosition with an existing solid node; use
-	 * {@link #removeNode(NodePosition)} first.
-	 * 
-	 * @param pos
-	 *            The position at which to set a node.
-	 * @param node
-	 *            The node to place at that position.
-	 */
-	public void setNode(NodePosition pos, MapNode node) {
-		// TODO stub
-	}
+    /**
+     * Registers a node alias. Since the map generator and scripts work via
+     * string names, registering an alias of mg:dirt to myscript:specialdirt
+     * will cause a mapgen that recognizes mg:dirt as a generated element to use
+     * specialdirt for that.
+     *
+     * @param alias The alias to create, i.e. mg:dirt
+     * @param dst   The existing node to set as the alias target, i.e
+     *              myscript:specialdirt. This element must already exist.
+     */
+    public void registerNodeAlias(String alias, String dst) {
+        this.nm.putNodeAlias(alias, dst);
+    }
 
-	/**
-	 * Removes a node, setting it to air. This may be called on a NodePosition
-	 * with an existing solid node.
-	 * 
-	 * @param pos
-	 *            The position at which to remove the node.
-	 */
-	public void removeNode(NodePosition pos) {
-		// TODO stub
-	}
 
-	public MapNode getNode(Position pos) {
-		// TODO stub
-		return null;
-	}
+    /**
+     * Gets the inv by name.
+     *
+     * @param player the player
+     * @param name   the name
+     * @return the inv by name
+     */
+    public MossInventory getInvByName(Player player, String name) {
+        return null;
+    }
 
-	public MapNode registerNode(String sysname, String userFacingName,
-			NodeParams params, String[] textures, boolean isLiquid, int light) {
-		MapNode nd = new MapNode(params, textures, sysname, userFacingName,
-				isLiquid, light);
-		return nd;
-	}
+    /**
+     * Creates the inv by name.
+     *
+     * @param p    the p
+     * @param name the name
+     * @return the moss inventory
+     */
+    public MossInventory createInvByName(Player p, String name) {
+        return null;
+    }
 
-	public MapNode registerNodeDefParams(String sysname, String userFacingName,
-			String[] textures, boolean isLiquid, int light) {
-		MapNode nd = new MapNode(textures, sysname, userFacingName, isLiquid,
-				light);
-		return nd;
-	}
+    /**
+     * Gets the player by name.
+     *
+     * @param name the name
+     * @return the player by name
+     */
+    public Player getPlayerByName(String name) {
+        return null;
+    }
 
-	public ItemStack[] getInventory(MossInventory inv) {
-		return new ItemStack[] {};
-		// TODO
-	}
+    /**
+     * Gets the node by name.
+     *
+     * @param name the name
+     * @return the node by name
+     */
+    public MapNode getNodeByName(String name) {
+        return null;
+    }
 
-	public MossInventory getInvByName(Player player, String name) {
-		return null;
-	}
+    /**
+     * Gets the db.
+     *
+     * @return the db
+     */
+    public ScriptableDatabase getDb() {
+        return this.db;
+    }
 
-	public MossInventory createInvByName(Player p, String name) {
-		return null;
-	}
+    /**
+     * Instantiates a new moss script env.
+     *
+     * @param db the db
+     * @param nc the nc
+     * @param fp the fp
+     * @param nm the nm
+     */
+    public MossScriptEnv(ScriptableDatabase db, MapCache nc,
+                         FuturesProcessor fp, INodeManager nm) {
+        this.db = db;
+        this.nc = nc;
+        this.fp = fp;
+        this.nm = nm;
+    }
 
-	public Player getPlayerByName(String name) {
-		return null;
-	}
+    /**
+     * Gets the futures processor.
+     *
+     * @return the futures processor
+     */
+    public FuturesProcessor getFuturesProcessor() {
+        return this.fp;
+    }
 
-	public MapNode getNodeByName(String name) {
-		return null;
-	}
+    private HashMap<Class<? extends IMossEvent>, List<WrappedHandler>> handlers = new HashMap<>();
 
-	
+    public List<WrappedHandler> getEventHandlers(
+            Class<? extends IMossEvent> clazz) {
+        List<WrappedHandler> l = Collections.unmodifiableList(handlers.get(clazz));
+        if (l == null) {
+            handlers.put(clazz, new ArrayList<WrappedHandler>());
+            return Collections.EMPTY_LIST;
+        }
+        return l;
 
-	public ScriptableDatabase getDb() {
-		return db;
-	}
+    }
 
-	public MossScriptEnv(ScriptableDatabase db, NodeCache nc) {
-		this.db = db;
-		this.nc = nc;
-	}
+    public void registerHandler(MossEventHandler handler, Class<? extends IMossEvent> clazz) {
+        List<WrappedHandler> l = handlers.get(clazz);
+        if (l == null) {
+            l = new ArrayList<WrappedHandler>();
+            handlers.put(clazz, l);
+        }
+        l.add(new WrappedHandler(handler, this.requestedScriptApiVer.get()));
 
+    }
 
 }

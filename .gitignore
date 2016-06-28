@@ -7,8 +7,11 @@
 *.db
 .svn
 .svn
-/.classpath
-.classpath
+.bzr
+/.bzr
+*/.bzr
+.bzrignore
+*/.bzrignore
 .project
 /nbproject/private/
 /dist/
@@ -23,3 +26,13 @@ COMMIT_EDITMSG
 .DS_Store
 /target
 /build/output
+/data/worlds
+src/git.properties
+/stacktraces
+/*.log
+*.log
+.idea
+/.idea
+/out
+/.idea/*
+/out/*
